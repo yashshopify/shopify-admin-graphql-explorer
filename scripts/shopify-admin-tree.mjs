@@ -859,6 +859,16 @@ mark{background:var(--mark);color:inherit;border-radius:2px}
 .example .ex-sub{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-soft);margin:10px 0 4px}
 .example pre.code{margin:0;overflow-x:auto;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--fg);white-space:pre}
 .example .hint{margin-top:8px}
+.notes{margin-top:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-soft);padding:10px 12px}
+.notes .ex-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-soft);margin-bottom:6px}
+.notes .note-p{margin:6px 0;font-size:13px;line-height:1.55;color:var(--fg)}
+.notes ul.usage{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.notes ul.usage li{display:flex;align-items:center;gap:5px}
+.hint.cost{border-top:1px dashed var(--border);padding-top:6px}
+.learn-wrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;margin-top:16px}
+.card.learn{margin:0}
+.card.learn h2{margin-top:0}
+.learn-p{font-size:13px;line-height:1.6;color:var(--fg);margin:8px 0}
 kbd{border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:0 4px;font-size:11px;
   background:var(--bg-soft);font-family:var(--mono)}
 .versions{display:flex;gap:6px;margin-bottom:8px}
@@ -916,6 +926,7 @@ var DATA = "__SHOPIFY_TREE_DATA__";
   var index = [];
   var typeIndex = {};
   var typeByName = {};
+  var usageByName = {};
   var expansion = {};
   var groups = [];
   var changeCounts = {};
@@ -949,6 +960,40 @@ var DATA = "__SHOPIFY_TREE_DATA__";
     }
     index = out;
     changeCounts = (DATA.meta.counts && DATA.meta.counts.changes) || {};
+    buildUsageIndex();
+  }
+
+  // Reverse index: type name -> [ {kind, domain, name, via} ]. Built once from
+  // every operation signature and type field so any type can answer "where is
+  // this used?" without rescanning the tree on each render.
+  function buildUsageIndex(){
+    var sigTypes = function(sig){
+      var names = [], m;
+      var re = /[A-Z][A-Za-z0-9_]+/g;
+      while ((m = re.exec(String(sig||"")))){
+        if (typeByName[m[0]] && names.indexOf(m[0]) === -1) names.push(m[0]);
+      }
+      return names;
+    };
+    for (var i = 0; i < index.length; i++){
+      var e = index[i], item = e.item, via = [];
+      if (e.kind === "queries" || e.kind === "mutations"){
+        via = sigTypes(item.type);
+        for (var a = 0; a < (item.args||[]).length; a++) via = via.concat(sigTypes(item.args[a].type));
+      } else {
+        for (var f = 0; f < (item.fields||[]).length; f++) via = via.concat(sigTypes(item.fields[f].type));
+        for (var g = 0; g < (item.inputFields||[]).length; g++) via = via.concat(sigTypes(item.inputFields[g].type));
+        via = via.concat(sigTypes((item.interfaces||[]).join(" ") + " " + (item.possibleTypes||[]).join(" ")));
+      }
+      for (var v = 0; v < via.length; v++){
+        if (via[v] === e.name) continue;
+        if (!usageByName[via[v]]) usageByName[via[v]] = [];
+        var list = usageByName[via[v]];
+        var dup = false;
+        for (var d = 0; d < list.length; d++){ if (list[d].key === e.kind + ":" + e.name){ dup = true; break; } }
+        if (!dup && list.length < 60) list.push({ kind:e.kind, domain:e.domain, name:e.name, key:e.kind+":"+e.name });
+      }
+    }
   }
 
   /* --------------------------- filtering -------------------------------- */
@@ -1200,11 +1245,75 @@ var DATA = "__SHOPIFY_TREE_DATA__";
 
   function selectionFor(item){
     var lines;
+    var isMutation = state.kind === "mutations";
+    if (isMutation){
+      // Mutations return *Payload objects. The canonical, always-valid shape is
+      // userErrors { field message } — Shopify's pattern for surfacing failures
+      // without transport-level errors. Chain onto the payload's own fields.
+      var payload = item.inner && typeByName[item.inner];
+      var out = [["userErrors {", 0], ["field", 1], ["message", 1], ["}", 0]];
+      if (payload && payload.fields){
+        for (var pf = 0; pf < payload.fields.length && out.length < 8; pf++){
+          var fld = payload.fields[pf];
+          if (fld.deprecated || fld.name === "userErrors" || (fld.args && fld.args.length)) continue;
+          var inner = fld.inner;
+          if (inner && typeByName[inner] && (typeByName[inner].kind === "OBJECT" || typeByName[inner].kind === "INTERFACE")){
+            var sub = selectionForType(inner, 1);
+            if (sub.length && sub.length <= 2){
+              out.push([fld.name + " {", 0]);
+              for (var q = 0; q < sub.length; q++) out.push([sub[q][0], sub[q][1] + 1]);
+              out.push(["}", 0]);
+            } else {
+              out.push([fld.name, 0]);
+            }
+          } else {
+            out.push([fld.name, 0]);
+          }
+          break; // one payload field + userErrors reads best
+        }
+      }
+      return out.map(function(pair){ return pair[1] > 0 ? ind(pair[1]) + pair[0] : pair[0]; }).join("\\n");
+    }
     if (/Connection!?$/.test(item.type || "")) lines = selectionForType(item.type.replace(/!$/, ""), 0);
     else if (item.inner && typeByName[item.inner]) lines = selectionForType(item.inner, 0);
     else return "";
-    return lines.map(function(pair){ return pair[1] > 0 ? indentOf(pair[1]) + pair[0] : pair[0]; }).join("\\n");
-    function indentOf(n){ return new Array(n + 1).join("  "); }
+    return lines.map(function(pair){ return pair[1] > 0 ? ind(pair[1]) + pair[0] : pair[0]; }).join("\\n");
+    function ind(n){ return new Array(n + 1).join("  "); }
+  }
+
+  // Explain the entry in plain language: what it returns, how to call it,
+  // what to watch out for. Rendered as "About" notes in the detail panel.
+  function opNotes(item, kind){
+    var notes = [];
+    var isConn = /Connection!?$/.test(item.type || "");
+    var inner = item.inner && typeByName[item.inner];
+    if (kind === "mutations"){
+      notes.push("Mutations never throw for expected failures — the payload carries a userErrors list. Always read userErrors before touching the data: it is the only reliable signal in Shopify's Admin API. Transport-level «errors»nse mean malformed GraphQL, auth problems, or throttling.");
+      notes.push("This mutation returns " + (inner ? inner.name : item.type) + ". " + (inner && inner.fields ? "Its payload has " + inner.fields.length + " fields" : "") + (inner && /UserError$/.test((inner.fields||[]).map(function(f){return f.inner||"";}).join(",")) ? ", including a userErrors field typed as a UserError object." : "."));
+    }
+    if (isConn){
+      notes.push("Returns a Connection (Relay-style pagination). Request edges { node { … } } or the shortcut nodes { … }. Page with first/last (page size, max 250 on most connections) and after/before (a cursor from pageInfo.endCursor). pageInfo { hasNextPage hasPreviousPage } tells you when to stop. Never paginate by offset — there is none; cursors are opaque strings.");
+    }
+    var req = (item.args||[]).filter(function(a){ return a.required; });
+    if (req.length){
+      notes.push("Required: " + req.map(function(a){ return a.name + " (" + a.type + ")"; }).join(", ") + ". Optional args on this operation: " + ((item.args||[]).length - req.length) + ".");
+    }
+    if (item.deprecated){
+      notes.push("DEPRECATED" + (item.deprecationReason ? " — " + item.deprecationReason : "") + ". Do not use in new code; migrate before the version that removes it. Deprecated entries survive for at least 12 months per Shopify's API versioning policy.");
+    }
+    if (item.change === "added") notes.push("New in " + (DATA.meta.compare ? DATA.meta.compare.version : "this release") + " — safe to adopt if you request this version or later.");
+    if (item.change === "removed") notes.push("REMOVED in " + (DATA.meta.compare ? DATA.meta.compare.version : "this release") + " — calls will fail with a field-not-defined error. Check the version switcher to find the last version that had it.");
+    return notes;
+  }
+
+  // Cost/rate-limit estimator: Shopify charges ~1 point per object returned;
+  // a connection with first:N costs about N + 1. Not exact, but the right order
+  // of magnitude for planning.
+  function costHint(item, kind){
+    if (kind === "mutations") return "Mutation cost is a flat rate (usually 10 points); mutations are throttled separately with a 60 s rolling bucket, plus a 30-second per-key lock so the same record cannot be mutated twice concurrently.";
+    var m = String(item.type||"").match(/Connection!?(?:\[(\d+)\])?/);
+    var pageSize = /first|last|limit/.test(JSON.stringify((item.args||[]).map(function(a){return a.name;}))) ? "your page size (up to 250)" : "1 (add first: N to raise it, max 250)";
+    return "Query cost scales with the objects you request. A connection page costs roughly its page size + 1; nested connections multiply. The response header X-Shopify-Shop-Api-Call-Limit reports usage like 12/2000 — a leaky-bucket that refills at 100 points/s (plus 1000 points monthly per-app cost budget on newer plans).";
   }
 
   function variablesTextFor(item){
@@ -1406,6 +1515,46 @@ var DATA = "__SHOPIFY_TREE_DATA__";
           detail.appendChild(fu);
         }
 
+        // --- plain-language notes --------------------------------
+        var notes = opNotes(item, state.kind);
+        if (notes.length){
+          var nwrap = el("div","notes");
+          nwrap.appendChild(el("div","ex-title","About"));
+          for (var ni = 0; ni < notes.length; ni++){
+            var np = el("p","note-p");
+            np.textContent = notes[ni];
+            nwrap.appendChild(np);
+          }
+          detail.appendChild(nwrap);
+        }
+
+        // --- where this type is used (reverse index) --------------
+        if (state.kind === "types" && usageByName[item.name] && usageByName[item.name].length){
+          var uwrap = el("div","notes");
+          uwrap.appendChild(el("div","ex-title","Used by"));
+          var uul = el("ul","usage");
+          var ulist = usageByName[item.name];
+          for (var ui = 0; ui < ulist.length && ui < 12; ui++){
+            (function(u){
+              var li = el("li");
+              var lnk = el("span","type-link", u.name);
+              lnk.title = "Go to " + u.name;
+              lnk.addEventListener("click", function(ev){
+                ev.stopPropagation();
+                if (u.kind === "types"){ drillTo(u.name); return; }
+                state.kind = u.kind; state.domain = u.domain; state.focus = u.domain + "|" + u.name; state.q = ""; $("q").value = "";
+                render({ push:true });
+              });
+              li.appendChild(el("span","badge", u.kind === "queries" ? "query" : u.kind === "mutations" ? "mutation" : "type"));
+              li.appendChild(lnk);
+              uul.appendChild(li);
+            })(ulist[ui]);
+          }
+          uwrap.appendChild(uul);
+          if (ulist.length > 12) uwrap.appendChild(el("div","hint","and " + (ulist.length - 12) + " more"));
+          detail.appendChild(uwrap);
+        }
+
         if (item.args){
           var exQuery = opFor(item, state.kind);
           var exVars = variablesTextFor(item);
@@ -1425,6 +1574,9 @@ var DATA = "__SHOPIFY_TREE_DATA__";
           if (/Connection!?$/.test(item.type || "")){
             exWrap.appendChild(el("div","hint","This returns a connection — page through it with the after argument and pageInfo.endCursor, and cap page size with first. Example: first: 50, after: \\"<endCursor>\\"."));
           }
+          var ch = el("div","hint cost");
+          ch.textContent = costHint(item, state.kind);
+          exWrap.appendChild(ch);
           var req = (item.args || []).filter(function(a){ return a.required; });
           if (req.length){
             exWrap.appendChild(el("div","hint","Required arguments are declared as variables — replace the sample values above with your own IDs and inputs."));
@@ -1668,6 +1820,101 @@ var DATA = "__SHOPIFY_TREE_DATA__";
     });
     barCard.appendChild(bars);
     host.appendChild(barCard);
+
+    // ------------------------- Learn GraphQL -----------------------------
+    // Self-contained reference: everything you need to call this API well,
+    // without leaving the page. Each card is short, opinionated, and concrete.
+    var GUIDES = [
+      {
+        title: "GraphQL in 60 seconds",
+        body: [
+          "GraphQL has one endpoint and one method: POST your query to /admin/api/" + DATA.meta.version + "/graphql.json and get back JSON shaped exactly like what you asked for. No over-fetching, no versioned REST URLs.",
+          "A query asks for data, a mutation changes it. Every field you request must be a scalar (String, Int, ID…) or have a { … } selection set — the API will reject queries that don't say which fields they want.",
+          "Arguments live inline: products(first: 10, query: 'status:active'). Variables ($v) keep queries cacheable and injection-safe; declare them in the operation signature and pass values separately in the JSON body."
+        ]
+      },
+      {
+        title: "Auth — how to actually call this",
+        body: [
+          "Every request needs the X-Shopify-Access-Token header. Get a token by OAuth (authorization code flow for user-facing apps) or a static shpat_ token from a custom app created in the store admin.",
+          "URL: https://{shop}.myshopify.com/admin/api/" + DATA.meta.version + "/graphql.json — always pin the version. Unpinned ('unstable') calls can break at any time; the version you see in this explorer's header is a 12-month supported release.",
+          "Token scopes gate what you can read or write: a token without write_products will get FORBIDDEN errors on product mutations regardless of the query being valid."
+        ]
+      },
+      {
+        title: "Pagination — Relay connections",
+        body: [
+          "List fields return Connections: edges { node { … } cursor } plus pageInfo { hasNextPage endCursor }. Loop by feeding pageInfo.endCursor back into the after argument. The nodes { … } shortcut skips the edge wrapper when you don't need cursors.",
+          "Max page size is 250 on most connections. Sane default: first: 50. Oversized pages inflate your cost bill faster than they save round-trips.",
+          "There is no offset pagination. Cursors are opaque strings — never parse them, just pass them back. If hasNextPage is false you're done; don't request one more page 'to be safe'."
+        ]
+      },
+      {
+        title: "Cost & rate limits — the leaky bucket",
+        body: [
+          "Shopify charges points per query: ~1 per object returned (a page of 50 products ≈ 51 points). Nested connections multiply. Response header X-Shopify-Shop-Call-Limit shows usage as used/max — on standard plans the bucket is 2000 points refilling at 100/s.",
+          "Mutations cost a flat ~10 points from a separate bucket, and carry a 30-second per-record lock: two concurrent mutations to the same product will THROTTLE the second.",
+          "Hit 429 Too Many Requests? Back off exponentially and honor the Retry-After header. For big reads use bulkOperationRunQuery instead — it streams results asynchronously for a fraction of the cost."
+        ]
+      },
+      {
+        title: "Errors — userErrors vs errors",
+        body: [
+          "Shopify mutations never fail 'expectedly' through the top-level errors key. Instead every mutation payload carries userErrors: [{ field, message }]. A mutation can return data: { productCreate: { userErrors: [...] } } with HTTP 200 — always check userErrors first.",
+          "Top-level errors only appear for genuinely broken requests: invalid GraphQL, missing auth, throttling (code: THROTTLED), or internal errors. Handle both layers; they mean different things.",
+          "On userErrors: field tells you which input was wrong, message is human-readable. Surface them to users rather than retrying blindly — the request will keep failing."
+        ]
+      },
+      {
+        title: "Versioning & deprecation — the 12-month rule",
+        body: [
+          "Shopify ships a new API version every 3 months (YYYY-MM). Each version is supported for 12 months. Anything marked @deprecated in this explorer disappears after its supporting versions retire.",
+          "The safe upgrade path: pin a version, watch the New/Changed/Removed badges in this explorer (compare mode), migrate deprecated fields, then bump. Never use 'unstable' in production.",
+          "Removed fields cause hard errors — your integration breaks, not degrades. The Removed filter in the sidebar is your pre-flight checklist before switching versions."
+        ]
+      },
+      {
+        title: "Bulk operations — reads at scale",
+        body: [
+          "For exports or syncs beyond a few thousand objects, don't paginate by hand. mutation { bulkOperationRunQuery(query: '…') { bulkOperation { id status } } } accepts a query WITHOUT first/after limits.",
+          "Poll bulkOperation { status objectCount url } (or listen to webhooks) until COMPLETED, then download the JSONL file from url — one object per line, flattened with child__ prefixes for nested fields.",
+          "One bulk operation per shop at a time. Cost is charged per object returned but at a fraction of interactive pricing, and it never counts against your leaky bucket."
+        ]
+      },
+      {
+        title: "Global IDs — the gid:// convention",
+        body: [
+          "Every object's id is a global Relay ID: gid://shopify/Product/1234567890. It's base64-encoded on the wire but Shopify accepts the decoded form in variables. Treat IDs as opaque strings — never int-parse them.",
+          "ID stitching: the numeric part matches the REST API's resource ID, so you can map between your REST integrations and GraphQL during migration.",
+          "This explorer shows every ID-typed argument with a realistic sample GID in its example variables — copy, replace the number, run."
+        ]
+      },
+      {
+        title: "Metafields — the extensibility valve",
+        body: [
+          "Almost every object carries metafields(namespace: 'x', key: 'y') and metafieldsIdentifiers. Store extra data without schema changes: typed JSON, integers, dates, references to other resources.",
+          "Set them via metafieldsSet (up to 25 per call) or inline on create/update mutations. Read them eagerly by listing namespaces first with metafieldNamespaces or the shop.metafieldNamespaces query.",
+          "Watch the type system: a metafield saved as json must be read as json — type mismatches return null silently, which is a classic integration bug."
+        ]
+      }
+    ];
+
+    function learnCard(g){
+      var card = el("div","card learn");
+      card.appendChild(el("h2", null, g.title));
+      for (var i = 0; i < g.body.length; i++){
+        var pp = el("p","learn-p");
+        pp.textContent = g.body[i];
+        card.appendChild(pp);
+      }
+      return card;
+    }
+
+    var learnWrap = el("div","learn-wrap");
+    for (var gi = 0; gi < GUIDES.length; gi++){
+      learnWrap.appendChild(learnCard(GUIDES[gi]));
+    }
+    host.appendChild(learnWrap);
 
     var help = el("div","card");
     help.appendChild(el("h2", null, "Keyboard"));
