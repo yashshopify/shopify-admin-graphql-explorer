@@ -1,0 +1,15 @@
+# Freebuff / editor state — never belongs in the repo
+.freebuff/
+
+# Local secrets: credentials live in env vars, never in tracked files
+.env
+.env.*
+
+# Local tooling
+node_modules/
+
+# Schema dumps are useful to commit for reproducible, auth-free generation,
+# so schema*.json is intentionally NOT ignored. Scratch output goes here:
+scratch/
+*.log
+.DS_Store
