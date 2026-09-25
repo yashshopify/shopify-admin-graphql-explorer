@@ -861,6 +861,11 @@ mark{background:var(--mark);color:inherit;border-radius:2px}
 .example .hint{margin-top:8px}
 kbd{border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:0 4px;font-size:11px;
   background:var(--bg-soft);font-family:var(--mono)}
+.versions{display:flex;gap:6px;margin-bottom:8px}
+.versions a{font:inherit;font-size:12px;text-decoration:none;border:1px solid var(--border);border-radius:999px;
+  padding:2px 10px;color:var(--fg-soft);background:var(--bg-elev)}
+.versions a:hover{border-color:var(--accent);color:var(--accent)}
+.versions a.current{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
 </style>
 </head>
 <body>
@@ -869,6 +874,7 @@ kbd{border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;pad
     <h1>Shopify Admin GraphQL API</h1>
     <div class="meta" id="meta"></div>
   </div>
+  <div class="versions" id="versions"></div>
   <div class="search"><input id="q" type="search" placeholder="Search fields, types, domains…   ( / )" autocomplete="off" spellcheck="false"></div>
 </header>
 <div class="layout">
@@ -1845,6 +1851,27 @@ var DATA = "__SHOPIFY_TREE_DATA__";
     }
     chip("source: " + m.source);
     chip("generated " + m.generatedAt);
+
+    var vhost = $("versions");
+    vhost.innerHTML = "";
+    var versions = [
+      { label: "2026-10", file: "shopify-admin-graphql-tree-2026-10.html", compare: "vs 2026-07" },
+      { label: "2026-07", file: "shopify-admin-graphql-tree.html", compare: "vs 2026-04" }
+    ];
+    for (var vi = 0; vi < versions.length; vi++){
+      (function(v){
+        var a = document.createElement("a");
+        a.href = v.file;
+        a.textContent = v.label;
+        if (v.label === m.version){
+          a.className = "current";
+          a.title = "You are viewing " + v.label + " (" + v.compare + ")";
+        } else {
+          a.title = "Switch to the " + v.label + " explorer";
+        }
+        vhost.appendChild(a);
+      })(versions[vi]);
+    }
   }
 
   /* --------------------------- keyboard --------------------------------- */

@@ -5,16 +5,24 @@ schema and renders a self-contained, browsable HTML explorer of the entire API.
 
 ## What you get
 
-`shopify-admin-graphql-tree.html` — one self-contained page. No server, no build step,
-no network requests; it opens straight from `file://`.
+Two self-contained pages — one per API version. No server, no build step,
+no network requests; they open straight from `file://`.
 
-- **287 queries, 524 mutations, 3548 types** across 30 domains for API version `2026-07`
+- **`shopify-admin-graphql-tree-2026-10.html`** — API version `2026-10`: **298 queries, 537 mutations, 3728 types**,
+  compared against `2026-07` (211 new, 125 changed, 23 removed)
+- **`shopify-admin-graphql-tree.html`** — API version `2026-07`: **287 queries, 524 mutations, 3548 types**,
+  compared against `2026-04` (295 new, 97 changed, 7 removed)
+- A **version switcher** in the header of each page links between the two
 - A domain-grouped tree with real field signatures, e.g.
   `products(first: Int, after: String, …): ProductConnection!`
 - **Drill-down** — click any type name inside a signature to jump to that type's own entry
 - **Search** with match highlighting, plus filters for type kind, `Deprecated only`, and `Connections only`
-- **Copy query / Copy curl** on any field. Connection-aware: connections expand to
-  `edges { node { id } }`, and required arguments are emitted as real GraphQL variables
+- **Runnable example per operation** — a multi-level selection auto-built from the schema
+  (connections expand to `edges { node { … } } + pageInfo`), realistic **variables JSON** derived
+  from argument types (GIDs, enums, input objects, dates, money), and one-click copy for
+  **query / variables / curl / Node fetch snippet**
+- **Copy query / Copy curl** on any field. Connection-aware: required arguments are emitted as
+  real GraphQL variables
 - **Overview dashboard** — totals, type-kind breakdown, busiest domains, deprecation counts
 - **Version comparison** — `New` / `Changed` / `Removed` / `Deprecated` badges showing what
   moved between API releases, with filters to isolate one kind of change
@@ -32,10 +40,21 @@ Node.js 18+ (uses the global `fetch`). No dependencies and no install step.
 node scripts/shopify-admin-tree.mjs
 
 # Pin a version and compare it against an older schema
-node scripts/shopify-admin-tree.mjs --version 2026-07 --compare schema-2026-04.json
+node scripts/shopify-admin-tree.mjs --version 2026-10 --compare schema-2026-07.json
 
 # Generate entirely offline from a saved introspection dump
-node scripts/shopify-admin-tree.mjs --schema schema-2026-07.json
+node scripts/shopify-admin-tree.mjs --schema schema-2026-10.json
+```
+
+### Building both version pages
+
+```bash
+node scripts/shopify-admin-tree.mjs --version 2026-10 --schema schema-2026-10.json \
+  --compare schema-2026-07.json --compare-version 2026-07 \
+  --out shopify-admin-graphql-tree-2026-10.html
+node scripts/shopify-admin-tree.mjs --version 2026-07 --schema schema-2026-07.json \
+  --compare schema-2026-04.json --compare-version 2026-04 \
+  --out shopify-admin-graphql-tree.html
 ```
 
 ### Credentials
