@@ -854,6 +854,11 @@ mark{background:var(--mark);color:inherit;border-radius:2px}
 .kinds span{border:1px solid var(--border);border-radius:999px;padding:2px 9px;font-size:12px;color:var(--fg-soft)}
 .kinds b{color:var(--fg)}
 .hint{color:var(--fg-soft);font-size:12px;margin-top:8px}
+.example{margin-top:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-soft);padding:10px 12px}
+.example .ex-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-soft);margin-bottom:6px}
+.example .ex-sub{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-soft);margin:10px 0 4px}
+.example pre.code{margin:0;overflow-x:auto;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--fg);white-space:pre}
+.example .hint{margin-top:8px}
 kbd{border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:0 4px;font-size:11px;
   background:var(--bg-soft);font-family:var(--mono)}
 </style>
@@ -904,6 +909,7 @@ var DATA = "__SHOPIFY_TREE_DATA__";
   };
   var index = [];
   var typeIndex = {};
+  var typeByName = {};
   var expansion = {};
   var groups = [];
   var changeCounts = {};
@@ -931,7 +937,7 @@ var DATA = "__SHOPIFY_TREE_DATA__";
             domain:d, kind:KINDS[k], name:it.name, item:it,
             hay: (it.name + " " + (it.type||"") + " " + d + " " + (it.description||"")).toLowerCase()
           });
-          if (KINDS[k] === "types") typeIndex[it.name] = { kind: it.kind, domain: d };
+          if (KINDS[k] === "types"){ typeIndex[it.name] = { kind: it.kind, domain: d }; typeByName[it.name] = it; }
         }
       }
     }
@@ -1057,13 +1063,147 @@ var DATA = "__SHOPIFY_TREE_DATA__";
 
   function cap(s){ return s.charAt(0).toUpperCase() + s.slice(1); }
 
-  function selectionFor(item){
-    if (/Connection!?$/.test(item.type || "")) return "edges {\\n  node {\\n    id\\n  }\\n}";
-    if (item.inner && typeIndex[item.inner]){
-      var k = typeIndex[item.inner].kind;
-      if (k === "OBJECT" || k === "INTERFACE") return "id";
+  /* ------------------------ example generation -------------------------- */
+
+  // Realistic-looking sample values, keyed off the argument's named type so
+  // the generated snippets feel like real requests instead of "TODO"s.
+  function sampleValueFor(typeName, argName){
+    var t = String(typeName || "");
+    var bare = t.replace(/[\\[\\]!]/g, "");
+    var isList = /\\[/.test(t);
+    var info = typeByName[bare];
+    var n = argName || "";
+    if (bare === "ID") return isList ? ["gid://shopify/Product/1234567890"] : "gid://shopify/Product/1234567890";
+    if (bare === "Int") return isList ? [10, 20] : 10;
+    if (bare === "Float") return 1.5;
+    if (bare === "Boolean") return true;
+    if (bare === "String") return n === "query" ? "status:ACTIVE" : "example";
+    if (info && info.kind === "INPUT_OBJECT"){
+      var obj = {};
+      var ins = info.inputFields || [];
+      for (var i = 0; i < ins.length && i < 4; i++){
+        obj[ins[i].name] = sampleValueFor(ins[i].type, ins[i].name);
+      }
+      return obj;
     }
-    return "";
+    if (/DateTime|Date$/.test(bare)) return bare === "Date" ? "2026-01-15" : "2026-01-15T12:30:00Z";
+    if (/URL/.test(bare)) return "https://example.com";
+    if (/HTML/.test(bare)) return "<p>Hello world</p>";
+    if (/Money$/.test(bare)) return { amount: "10.99", currencyCode: "USD" };
+    if (bare === "Decimal") return "10.99";
+    if (bare === "CountryCode") return isList ? ["US", "CA"] : "US";
+    if (bare === "LanguageCode") return "EN";
+    if (bare === "CurrencyCode") return "USD";
+    if (info && info.kind === "ENUM"){
+      var vals = (info.enumValues || []).filter(function(v){ return !v.deprecated; });
+      var pick = vals.length ? vals[0].name : (info.enumValues[0] ? info.enumValues[0].name : "VALUE");
+      return isList ? [pick] : pick;
+    }
+    return "REPLACE_ME";
+  }
+
+  function variablesFor(item){
+    var req = (item.args || []).filter(function(a){ return a.required; });
+    if (!req.length) return null;
+    var out = {};
+    for (var i = 0; i < req.length; i++) out[req[i].name] = sampleValueFor(req[i].type, req[i].name);
+    return out;
+  }
+
+  // A scalar-ish field we can safely terminate a selection on.
+  function isLeafType(name){
+    var info = typeByName[name];
+    if (!info) return true; // built-in scalar
+    return info.kind === "SCALAR" || info.kind === "ENUM";
+  }
+
+  function pickFields(typeName, max){
+    var info = typeByName[typeName];
+    if (!info || !info.fields) return [];
+    var out = [];
+    var fields = info.fields;
+    for (var i = 0; i < fields.length && out.length < max; i++){
+      var f = fields[i];
+      if (f.deprecated) continue;
+      if (f.args && f.args.length) continue; // needs args — skip in auto examples
+      var inner = f.inner;
+      if (isLeafType(inner)) out.push(f);
+    }
+    return out;
+  }
+
+  // Build a multi-level example selection. Connections expand to
+  // edges { node { ... } } + pageInfo so the snippet shows pagination too.
+  function selectionForType(typeName, depth){
+    function indent(n){ return new Array(n + 1).join("  "); }
+    var bare = String(typeName || "").replace(/[\\[\\]!]/g, "");
+    var info = typeByName[bare];
+    if (depth > 2) return [["id", 0]];
+    if (/Connection$/.test(bare)){
+      var m = bare.match(/^(.+)Connection$/);
+      var nodeType = m ? m[1] : null;
+      var nodeSel = (nodeType && typeByName[nodeType]) ? selectionForType(nodeType, depth + 1) : [["id", 0]];
+      var out = [["edges {", 0], ["node {", 1]];
+      for (var i = 0; i < nodeSel.length; i++){
+        out.push([nodeSel[i][0], nodeSel[i][1] + 2]);
+      }
+      out.push(["}", 1]);
+      out.push(["}", 0]);
+      out.push(["pageInfo {", 0]);
+      out.push(["hasNextPage", 1]);
+      out.push(["endCursor", 1]);
+      out.push(["}", 0]);
+      return out;
+    }
+    if (!info) return [["id", 0]];
+    if (info.kind === "INTERFACE" || info.kind === "UNION"){
+      var poss = info.possibleTypes || [];
+      if (!poss.length || depth > 1) return [["id", 0]];
+      var frag = [["__typename", 0], ["... on " + poss[0] + " {", 0]];
+      var sub = selectionForType(poss[0], depth + 1);
+      for (var j = 0; j < sub.length; j++) frag.push([sub[j][0], sub[j][1] + 1]);
+      frag.push(["}", 0]);
+      return frag;
+    }
+    if (info.kind === "OBJECT"){
+      var leaves = pickFields(bare, 5);
+      var out2 = [];
+      for (var k = 0; k < leaves.length; k++) out2.push([leaves[k].name, 0]);
+      if (!out2.length) return [["id", 0]];
+      if (depth < 2){
+        var fields = info.fields;
+        for (var f2 = 0; f2 < fields.length && out2.length < 6; f2++){
+          var ff = fields[f2];
+          if (ff.deprecated || (ff.args && ff.args.length)) continue;
+          var inner2 = ff.inner;
+          if (inner2 && typeByName[inner2] && typeByName[inner2].kind === "OBJECT" && !/Connection$/.test(inner2)){
+            var nested = selectionForType(inner2, depth + 1);
+            if (nested.length && nested.length <= 3){
+              out2.push([ff.name + " {", 0]);
+              for (var n2 = 0; n2 < nested.length; n2++) out2.push([nested[n2][0], nested[n2][1] + 1]);
+              out2.push(["}", 0]);
+              break;
+            }
+          }
+        }
+      }
+      return out2;
+    }
+    return [["id", 0]];
+  }
+
+  function selectionFor(item){
+    var lines;
+    if (/Connection!?$/.test(item.type || "")) lines = selectionForType(item.type.replace(/!$/, ""), 0);
+    else if (item.inner && typeByName[item.inner]) lines = selectionForType(item.inner, 0);
+    else return "";
+    return lines.map(function(pair){ return pair[1] > 0 ? indentOf(pair[1]) + pair[0] : pair[0]; }).join("\\n");
+    function indentOf(n){ return new Array(n + 1).join("  "); }
+  }
+
+  function variablesTextFor(item){
+    var v = variablesFor(item);
+    return v ? JSON.stringify(v, null, 2) : null;
   }
 
   function opFor(item, kind){
@@ -1091,8 +1231,10 @@ var DATA = "__SHOPIFY_TREE_DATA__";
     return out.join("\\n");
   }
 
-  function curlFor(query){
-    var body = JSON.stringify({ query: query });
+  function curlFor(query, variables){
+    var payload = { query: query };
+    if (variables) payload.variables = variables;
+    var body = JSON.stringify(payload);
     return "curl -X POST \\\\\\n" +
       "  https://{shop}.myshopify.com/admin/api/" + DATA.meta.version + "/graphql.json \\\\\\n" +
       "  -H 'Content-Type: application/json' \\\\\\n" +
@@ -1220,7 +1362,10 @@ var DATA = "__SHOPIFY_TREE_DATA__";
           var ul = el("ul","args");
           for (var i = 0; i < args.length; i++){
             var li = el("li");
-            li.appendChild(el("span", args[i].required ? "req" : null, args[i].name + ": " + args[i].type));
+            var sig = el("span", args[i].required ? "req" : null);
+            sig.appendChild(document.createTextNode(args[i].name + ": "));
+            sig.appendChild(typeSigFragment(args[i].type));
+            li.appendChild(sig);
             if (args[i].description) li.appendChild(document.createTextNode("  — " + args[i].description));
             ul.appendChild(li);
           }
@@ -1256,22 +1401,58 @@ var DATA = "__SHOPIFY_TREE_DATA__";
         }
 
         if (item.args){
+          var exQuery = opFor(item, state.kind);
+          var exVars = variablesTextFor(item);
+
+          // --- runnable example block --------------------------------
+          var exWrap = el("div","example");
+          exWrap.appendChild(el("div","ex-title","Example"));
+          var pre = el("pre","code");
+          pre.textContent = exQuery;
+          exWrap.appendChild(pre);
+          if (exVars){
+            exWrap.appendChild(el("div","ex-sub","Variables (JSON)"));
+            var vpre = el("pre","code");
+            vpre.textContent = exVars;
+            exWrap.appendChild(vpre);
+          }
+          if (/Connection!?$/.test(item.type || "")){
+            exWrap.appendChild(el("div","hint","This returns a connection — page through it with the after argument and pageInfo.endCursor, and cap page size with first. Example: first: 50, after: \\"<endCursor>\\"."));
+          }
+          var req = (item.args || []).filter(function(a){ return a.required; });
+          if (req.length){
+            exWrap.appendChild(el("div","hint","Required arguments are declared as variables — replace the sample values above with your own IDs and inputs."));
+          }
+
           var tools = el("div","tools");
-          var qbtn = el("button","","Copy query");
-          qbtn.type = "button";
-          qbtn.addEventListener("click", function(ev){
-            ev.stopPropagation();
-            copyText(opFor(item, state.kind), qbtn);
-          });
-          var cbtn = el("button","","Copy curl");
-          cbtn.type = "button";
-          cbtn.addEventListener("click", function(ev){
-            ev.stopPropagation();
-            copyText(curlFor(opFor(item, state.kind)), cbtn);
-          });
-          tools.appendChild(qbtn); tools.appendChild(cbtn);
-          detail.appendChild(tools);
-          detail.appendChild(el("div","hint","Required arguments are declared as variables. Fill them before running."));
+          var mkBtn = function(label, getText){
+            var b = el("button","",label);
+            b.type = "button";
+            b.addEventListener("click", function(ev){
+              ev.stopPropagation();
+              copyText(getText(), b);
+            });
+            return b;
+          };
+          tools.appendChild(mkBtn("Copy query", function(){ return exQuery; }));
+          if (exVars) tools.appendChild(mkBtn("Copy variables", function(){ return exVars; }));
+          tools.appendChild(mkBtn("Copy curl", function(){
+            return curlFor(exQuery, exVars ? JSON.parse(exVars) : undefined);
+          }));
+          tools.appendChild(mkBtn("Copy JS fetch", function(){
+            var payload = { query: exQuery };
+            if (exVars) payload.variables = JSON.parse(exVars);
+            return "const response = await fetch(\\"https://{shop}.myshopify.com/admin/api/" + DATA.meta.version + "/graphql.json\\", {\\n" +
+              "  method: \\"POST\\",\\n" +
+              "  headers: {\\n" +
+              "    \\"Content-Type\\": \\"application/json\\",\\n" +
+              "    \\"X-Shopify-Access-Token\\": process.env.SHOPIFY_ACCESS_TOKEN,\\n" +
+              "  },\\n" +
+              "  body: JSON.stringify(" + JSON.stringify(payload, null, 2) + "),\\n" +
+              "});\\nconst { data, errors } = await response.json();\\nif (errors) console.error(errors);\\nconsole.log(JSON.stringify(data, null, 2));";
+          }));
+          exWrap.appendChild(tools);
+          detail.appendChild(exWrap);
         }
 
         node.appendChild(detail);
@@ -1723,7 +1904,7 @@ var DATA = "__SHOPIFY_TREE_DATA__";
 
   // Exposed for tests and console poking.
   window.__tree = {
-    state: state, index: index, typeIndex: typeIndex,
+    state: state, index: index, typeIndex: typeIndex, typeByName: typeByName,
     opFor: opFor, curlFor: curlFor, selectionFor: selectionFor,
     render: render, drillTo: drillTo, readHash: readHash
   };
